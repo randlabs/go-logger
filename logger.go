@@ -1,4 +1,4 @@
-package main
+package go_simple_log
 
 import (
 	"errors"
