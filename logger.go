@@ -19,23 +19,45 @@ import (
 
 var appName string
 var newLine = "\n"
-var logOptions FileOptions
+var fileOptions *FileOptions
 var fileMutex sync.Mutex
 var logFd *os.File = nil
 var dayOfFile int
 var swc *swcgo.ServerWatcherClient
+var shutdownProcessRegister chan struct{}
+var consoleLogger *IConsoleLogger
 
 //------------------------------------------------------------------------------
 
+// Options ...
 type Options struct {
 	FileOpts *FileOptions               `json:"file,omitempty"`
 	ServerWatchdog *swcgo.ClientOptions `json:"serverWatchdog,omitempty"`
+	ConsoleLogger *IConsoleLogger
 }
 
+// FileOptions ...
 type FileOptions struct {
 	DaysToKeep uint   `json:"daysToKeep,omitempty"`
 	Folder     string `json:"folder,omitempty"`
 	UseLocalTime bool `json:"useLocalTime,omitempty"`
+}
+
+// IConsoleLogger ...
+type IConsoleLogger interface {
+	Error(now time.Time, msg string)
+	Warn(now time.Time, msg string)
+	Info(now time.Time, msg string)
+	Debug(now time.Time, msg string)
+}
+
+//------------------------------------------------------------------------------
+
+func init() {
+	if runtime.GOOS == "windows" {
+		newLine = "\r\n"
+	}
+	return
 }
 
 //------------------------------------------------------------------------------
@@ -49,39 +71,66 @@ func Initialize(_appName string, options Options, baseFolder string) error {
 	}
 	appName = _appName
 
-	logOptions.Folder = "logs"
 	if options.FileOpts != nil {
+		fileOptions = &FileOptions{
+			DaysToKeep:   options.FileOpts.DaysToKeep,
+			Folder:       options.FileOpts.Folder,
+			UseLocalTime: options.FileOpts.UseLocalTime,
+		}
 		if len(options.FileOpts.Folder) > 0 {
-			logOptions.Folder = options.FileOpts.Folder
+			fileOptions.Folder = options.FileOpts.Folder
+		} else {
+			fileOptions.Folder = "logs"
 		}
 
-		logOptions.DaysToKeep = options.FileOpts.DaysToKeep
-
-		logOptions.UseLocalTime = options.FileOpts.UseLocalTime
+		if !filepath.IsAbs(fileOptions.Folder) {
+			fileOptions.Folder = filepath.Join(baseFolder, fileOptions.Folder)
+		}
+		fileOptions.Folder = filepath.Clean(fileOptions.Folder)
+		if !strings.HasSuffix(fileOptions.Folder, string(filepath.Separator)) {
+			fileOptions.Folder += string(filepath.Separator)
+		}
 	}
 
-	if !filepath.IsAbs(logOptions.Folder) {
-		logOptions.Folder = filepath.Join(baseFolder, logOptions.Folder)
-	}
-	logOptions.Folder = filepath.Clean(logOptions.Folder)
-	if !strings.HasSuffix(logOptions.Folder, string(filepath.Separator)) {
-		logOptions.Folder += string(filepath.Separator)
-	}
-
-	if runtime.GOOS == "windows" {
-		newLine = "\r\n"
-	}
+	consoleLogger = options.ConsoleLogger
 
 	if options.ServerWatchdog != nil {
+		shutdownProcessRegister = make(chan struct{})
+
 		swc, err = swcgo.Create(*options.ServerWatchdog)
 		if err != nil {
+			Finalize()
 			return  err
 		}
 
-		err = swc.ProcessWatch(os.Getpid(), appName, "error", "")
-		if err != nil {
-			return  err
-		}
+		go func(swc *swcgo.ServerWatcherClient) {
+			lastRegistrationSucceeded := true
+			loop := true
+			var err error
+
+			for loop {
+				select {
+				case <-shutdownProcessRegister:
+					loop = false
+
+				case <-time.After(1 * time.Minute):
+					err = swc.ProcessWatch(os.Getpid(), appName, "error", "")
+					if err == nil {
+						lastRegistrationSucceeded = true
+					} else {
+						if lastRegistrationSucceeded {
+							lastRegistrationSucceeded = false
+
+							now := getCurrentTime()
+							err := writeLog("[WARN]", "Unable to register process in ServerWatchdog", color.Warn, now)
+							if err != nil {
+								printError(now, "Unable to save notification in file", err)
+							}
+						}
+					}
+				}
+			}
+		}(swc)
 	}
 
 	cleanOldFiles()
@@ -91,6 +140,8 @@ func Initialize(_appName string, options Options, baseFolder string) error {
 
 func Finalize() {
 	if swc != nil {
+		close(shutdownProcessRegister)
+
 		_ = swc.ProcessUnwatch(os.Getpid(), "")
 
 		swc = nil
@@ -103,19 +154,21 @@ func Finalize() {
 		logFd = nil
 	}
 	fileMutex.Unlock()
+
+	consoleLogger = nil
 }
 
-func Info(format string, a ...interface{}) {
+func Error(format string, a ...interface{}) {
 	msg := fmt.Sprintf(format, a...)
-	now := getCurrentTime()
+	now := time.Now().UTC()
 
-	err := writeLog("[INFO]", msg, color.Info, now)
+	err := writeLog("[ERROR]", msg, color.Error, now)
 	if err != nil {
 		printError(now, "Unable to save notification in file", err)
 	}
 
 	if swc != nil {
-		err = swc.Info(msg, "")
+		err = swc.Error(msg, "")
 		if err != nil {
 			printError(now, "Unable to deliver notification to Server Watchdog", err)
 		}
@@ -141,17 +194,17 @@ func Warn(format string, a ...interface{}) {
 	return
 }
 
-func Error(format string, a ...interface{}) {
+func Info(format string, a ...interface{}) {
 	msg := fmt.Sprintf(format, a...)
-	now := time.Now().UTC()
+	now := getCurrentTime()
 
-	err := writeLog("[ERROR]", msg, color.Error, now)
+	err := writeLog("[INFO]", msg, color.Info, now)
 	if err != nil {
 		printError(now, "Unable to save notification in file", err)
 	}
 
 	if swc != nil {
-		err = swc.Error(msg, "")
+		err = swc.Info(msg, "")
 		if err != nil {
 			printError(now, "Unable to deliver notification to Server Watchdog", err)
 		}
@@ -174,53 +227,64 @@ func Debug(format string, a ...interface{}) {
 func writeLog(title string, msg string, theme *color.Theme, now time.Time) error {
 	var err error
 
-	color.Print(now.Format("2006-01-02 15:04:05") + " ")
-	theme.Print(title)
-	color.Print(" - "+ msg + "\n")
+	if consoleLogger != nil {
+		switch theme {
+		case color.Error:
+			(*consoleLogger).Error(now, msg)
+		case color.Warn:
+			(*consoleLogger).Warn(now, msg)
+		case color.Info:
+			(*consoleLogger).Info(now, msg)
+		case color.Debug:
+			(*consoleLogger).Debug(now, msg)
+		}
+	} else {
+		color.Print(now.Format("2006-01-02 15:04:05") + " ")
+		theme.Print(title)
+		color.Print(" - " + msg + "\n")
+	}
 
 	err = nil
 
-	fileMutex.Lock()
-	if logFd == nil || now.Day() != dayOfFile {
-		var filename string
+	if fileOptions != nil {
+		fileMutex.Lock()
+		if logFd == nil || now.Day() != dayOfFile {
+			var filename string
 
-		if logFd != nil {
-			_ = logFd.Sync()
-			_ = logFd.Close()
-			logFd = nil
+			if logFd != nil {
+				_ = logFd.Sync()
+				_ = logFd.Close()
+				logFd = nil
+			}
+
+			cleanOldFiles()
+
+			_ = os.MkdirAll(fileOptions.Folder, 0755)
+
+			filename = fileOptions.Folder + strings.ToLower(appName) + "." + now.Format("2006-01-02") + ".log"
+
+			logFd, err = os.OpenFile(filename, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+			if err == nil {
+				dayOfFile = now.Day()
+			}
 		}
-
-		cleanOldFiles()
-
-		_ = os.MkdirAll(logOptions.Folder, 0755)
-
-		filename = logOptions.Folder + strings.ToLower(appName) + "." + now.Format("2006-01-02") + ".log"
-
-		logFd, err = os.OpenFile(filename, os.O_WRONLY | os.O_APPEND | os.O_CREATE, 0644)
 		if err == nil {
-			dayOfFile = now.Day()
+			_, err = logFd.WriteString("[" + now.Format("2006-01-02 15:04:05") + "] " + title + " - " + msg + newLine)
 		}
+		fileMutex.Unlock()
 	}
-	if err == nil {
-		_, err = logFd.WriteString("[" + now.Format("2006-01-02 15:04:05") + "] " + title + " - " + msg + newLine)
-	}
-	defer fileMutex.Unlock()
 
 	return err
 }
 
 func cleanOldFiles() {
-	var files []os.FileInfo
-	var lowestTime time.Time
-	var err error
-
-	if logOptions.DaysToKeep == 0 {
+	if fileOptions == nil || fileOptions.DaysToKeep == 0 {
 		return
 	}
 
-	lowestTime = time.Now().UTC().AddDate(0, 0, -(int(logOptions.DaysToKeep)))
+	lowestTime := time.Now().UTC().AddDate(0, 0, -(int(fileOptions.DaysToKeep)))
 
-	files, err = ioutil.ReadDir(logOptions.Folder)
+	files, err := ioutil.ReadDir(fileOptions.Folder)
 	if err == nil {
 		appNameLC := strings.ToLower(appName)
 
@@ -229,7 +293,7 @@ func cleanOldFiles() {
 
 			if (!f.IsDir()) && strings.HasSuffix(nameLC, ".log") && strings.HasPrefix(nameLC, appNameLC) {
 				if f.ModTime().Before(lowestTime) {
-					_ = os.Remove(logOptions.Folder + f.Name())
+					_ = os.Remove(fileOptions.Folder + f.Name())
 				}
 			}
 		}
@@ -239,15 +303,19 @@ func cleanOldFiles() {
 
 func getCurrentTime() time.Time {
 	now := time.Now()
-	if logOptions.UseLocalTime {
+	if fileOptions != nil && fileOptions.UseLocalTime {
 		now = now.UTC()
 	}
 	return now
 }
 
 func printError(now time.Time, msg string, err error) {
-	color.Print(now.Format("2006-01-02 15:04:05") + " ")
-	color.Error.Print("[ERROR]")
-	color.Print(" - %v. [%v]\n", msg, err)
+	if consoleLogger != nil {
+		(*consoleLogger).Error(now, fmt.Sprintf("%v. [%v]", msg, err.Error()))
+	} else {
+		color.Print(now.Format("2006-01-02 15:04:05") + " ")
+		color.Error.Print("[ERROR]")
+		color.Print(" - %v. [%v]\n", msg, err.Error())
+	}
 	return
 }
