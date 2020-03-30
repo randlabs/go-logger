@@ -31,6 +31,8 @@ var consoleLogger *IConsoleLogger
 
 // Options ...
 type Options struct {
+	AppName string
+	BaseFolder string
 	FileOpts *FileOptions               `json:"file,omitempty"`
 	ServerWatchdog *swcgo.ClientOptions `json:"serverWatchdog,omitempty"`
 	ConsoleLogger *IConsoleLogger
@@ -63,13 +65,13 @@ func init() {
 //------------------------------------------------------------------------------
 
 // Initialize...
-func Initialize(_appName string, options Options, baseFolder string) error {
+func Initialize(options Options) error {
 	var err error
 
-	if len(_appName) == 0 {
+	if len(options.AppName) == 0 {
 		return errors.New("invalid application name")
 	}
-	appName = _appName
+	appName = options.AppName
 
 	if options.FileOpts != nil {
 		fileOptions = &FileOptions{
@@ -84,7 +86,7 @@ func Initialize(_appName string, options Options, baseFolder string) error {
 		}
 
 		if !filepath.IsAbs(fileOptions.Folder) {
-			fileOptions.Folder = filepath.Join(baseFolder, fileOptions.Folder)
+			fileOptions.Folder = filepath.Join(options.BaseFolder, fileOptions.Folder)
 		}
 		fileOptions.Folder = filepath.Clean(fileOptions.Folder)
 		if !strings.HasSuffix(fileOptions.Folder, string(filepath.Separator)) {
@@ -103,34 +105,20 @@ func Initialize(_appName string, options Options, baseFolder string) error {
 			return  err
 		}
 
-		go func(swc *swcgo.ServerWatcherClient) {
-			lastRegistrationSucceeded := true
-			loop := true
-			var err error
+		go func() {
+			lastRegistrationSucceeded := registerAppInServerWatchdog(true)
 
+			loop := true
 			for loop {
 				select {
 				case <-shutdownProcessRegister:
 					loop = false
 
 				case <-time.After(1 * time.Minute):
-					err = swc.ProcessWatch(os.Getpid(), appName, "error", "")
-					if err == nil {
-						lastRegistrationSucceeded = true
-					} else {
-						if lastRegistrationSucceeded {
-							lastRegistrationSucceeded = false
-
-							now := getCurrentTime()
-							err := writeLog("[WARN]", "Unable to register process in ServerWatchdog", color.Warn, now)
-							if err != nil {
-								printError(now, "Unable to save notification in file", err)
-							}
-						}
-					}
+					lastRegistrationSucceeded = registerAppInServerWatchdog(lastRegistrationSucceeded)
 				}
 			}
-		}(swc)
+		}()
 	}
 
 	cleanOldFiles()
@@ -275,6 +263,21 @@ func writeLog(title string, msg string, theme *color.Theme, now time.Time) error
 	}
 
 	return err
+}
+
+func registerAppInServerWatchdog(logError bool) bool {
+	err := swc.ProcessWatch(os.Getpid(), appName, "error", "")
+	if err == nil {
+		return true
+	}
+	if logError {
+		now := getCurrentTime()
+		err := writeLog("[WARN]", "Unable to register process in ServerWatchdog", color.Warn, now)
+		if err != nil {
+			printError(now, "Unable to save notification in file", err)
+		}
+	}
+	return false
 }
 
 func cleanOldFiles() {
