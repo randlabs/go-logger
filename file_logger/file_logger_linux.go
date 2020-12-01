@@ -2,6 +2,7 @@ package file_logger
 
 import (
 	"os"
+	"syscall"
 	"time"
 )
 
