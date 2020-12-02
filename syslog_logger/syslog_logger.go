@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	consolelogger "github.com/randlabs/go-simple-log/console"
+	consolelogger "github.com/randlabs/go-logger/console"
 )
 
 //------------------------------------------------------------------------------
