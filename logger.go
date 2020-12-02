@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	consolelogger "github.com/randlabs/go-simple-log/console"
-	filelogger "github.com/randlabs/go-simple-log/file_logger"
-	sysloglogger "github.com/randlabs/go-simple-log/syslog_logger"
+	consolelogger "github.com/randlabs/go-logger/console"
+	filelogger "github.com/randlabs/go-logger/file_logger"
+	sysloglogger "github.com/randlabs/go-logger/syslog_logger"
 )
 
 //------------------------------------------------------------------------------
