@@ -1,9 +1,9 @@
 package go_logger
 
 import (
-	filelogger "github.com/randlabs/go-logger/file_logger"
 	"testing"
 
+	filelogger "github.com/randlabs/go-logger/file_logger"
 	sysloglogger "github.com/randlabs/go-logger/syslog_logger"
 )
 
