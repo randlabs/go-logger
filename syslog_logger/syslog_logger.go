@@ -66,7 +66,7 @@ func CreateSysLogLogger(appName string, options *SysLogOptions) (*SysLogLogger, 
 		syslogLogger.host = "127.0.0.1"
 	}
 
-	if options.Port == 0 {
+	if options.Port != 0 {
 		syslogLogger.port = options.Port
 	} else {
 		if options.UseTcp {
