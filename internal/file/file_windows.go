@@ -1,4 +1,4 @@
-package file_logger
+package file
 
 import (
 	"os"
@@ -9,6 +9,6 @@ import (
 //------------------------------------------------------------------------------
 
 func getFileCreationtime(fi os.FileInfo) time.Time {
-	stat := fi.Sys().(*syscall.Stat_t)
-	return time.Unix(int64(stat.Ctim.Sec), int64(stat.Ctim.Nsec))
+	stat := fi.Sys().(*syscall.Win32FileAttributeData)
+	return time.Unix(0, stat.CreationTime.Nanoseconds())
 }
