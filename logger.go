@@ -21,23 +21,6 @@ const (
 	LogLevelDebug            = 4
 )
 
-// Options specifies the logger settings to use when initialized.
-type Options struct {
-	DisableConsole bool           `json:"disableConsole,omitempty"`
-	FileLog        *FileOptions   `json:"fileLog,omitempty"`
-	SysLog         *SyslogOptions `json:"sysLog,omitempty"`
-	Level          LogLevel       `json:"level,omitempty"`
-	DebugLevel     uint           `json:"debugLevel,omitempty"`
-	UseLocalTime   bool           `json:"useLocalTime,omitempty"`
-	ErrorHandler   ErrorHandler
-}
-
-// ErrorHandler is a callback to call if an internal error must be notified.
-type ErrorHandler func(message string)
-
-type FileOptions file.Options
-type SyslogOptions syslog.Options
-
 // Logger is the object that controls logging.
 type Logger struct {
 	mtx            sync.RWMutex
@@ -50,6 +33,39 @@ type Logger struct {
 	errorHandler   ErrorHandler
 }
 
+// Options specifies the logger settings to use when initialized.
+type Options struct {
+	// Disable console output.
+	DisableConsole bool `json:"disableConsole,omitempty"`
+
+	// Optionally enable file logging and establish its settings.
+	FileLog        *FileOptions `json:"fileLog,omitempty"`
+
+	// Optionally enable syslog logging and establish its settings.
+	SysLog         *SyslogOptions `json:"sysLog,omitempty"`
+
+	// Set the initial logging level to use.
+	Level          LogLevel `json:"level,omitempty"`
+
+	// Set the initial logging level for debug output to use.
+	DebugLevel     uint `json:"debugLevel,omitempty"`
+
+	// Use the local computer time instead of UTC.
+	UseLocalTime   bool `json:"useLocalTime,omitempty"`
+
+	// A callback to call if an internal error is encountered.
+	ErrorHandler   ErrorHandler
+}
+
+// ErrorHandler is a callback to call if an internal error must be notified.
+type ErrorHandler func(message string)
+
+// FileOptions specifies the file logger settings.
+type FileOptions file.Options
+
+// SyslogOptions specifies the syslog logger settings.
+type SyslogOptions syslog.Options
+
 //------------------------------------------------------------------------------
 
 var (
@@ -59,6 +75,7 @@ var (
 
 //------------------------------------------------------------------------------
 
+// Default returns a logger that only outputs error and warnings to the console.
 func Default() *Logger {
 	defaultLoggerInit.Do(func() {
 		defaultLogger, _ = Create(Options{
