@@ -1,6 +1,8 @@
 package go_logger_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	gologger "github.com/randlabs/go-logger"
@@ -13,6 +15,10 @@ func TestDefault(t *testing.T) {
 }
 
 func TestFileLog(t *testing.T) {
+	if dir, err := filepath.Abs(filepath.FromSlash("./testdata/logs")); err == nil {
+		_ = os.RemoveAll(dir)
+	}
+
 	logger, err := gologger.Create(gologger.Options{
 		DisableConsole: true,
 		FileLog: &gologger.FileOptions{
