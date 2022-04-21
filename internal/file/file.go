@@ -19,14 +19,6 @@ var newLine = "\n"
 
 //------------------------------------------------------------------------------
 
-// Options specifies the file logger settings to use when it is created.
-type Options struct {
-	Prefix       string `json:"prefix,omitempty"`
-	Directory    string `json:"dir,omitempty"`
-	DaysToKeep   uint   `json:"daysToKeep,omitempty"`
-	ErrorHandler ErrorHandler
-}
-
 // Logger is the object that controls file logging.
 type Logger struct {
 	mtx          sync.Mutex
@@ -37,6 +29,21 @@ type Logger struct {
 	prefix       string
 	dayOfFile    int
 	errorHandler ErrorHandler
+}
+
+// Options specifies the file logger settings to use when it is created.
+type Options struct {
+	// Filename prefix to use when a file is created. Defaults to the binary name.
+	Prefix       string `json:"prefix,omitempty"`
+
+	// Destination directory to store log files.
+	Directory    string `json:"dir,omitempty"`
+
+	// Amount of days to keep old logs.
+	DaysToKeep   uint   `json:"daysToKeep,omitempty"`
+
+	// A callback to call if an internal error is encountered.
+	ErrorHandler ErrorHandler
 }
 
 // ErrorHandler is a callback to call if an internal error must be notified.

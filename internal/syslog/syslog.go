@@ -1,6 +1,7 @@
 package syslog
 
 import (
+	"container/list"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	rp "github.com/randlabs/rundown-protection"
 )
 
 //------------------------------------------------------------------------------
@@ -22,38 +25,62 @@ const (
 	severityDebug         = 7
 
 	facilityUser = 1
+
+	defaultMaxMessageQueueSize = 1024
+
+	flushTimeout = 5 * time.Second
 )
 
 //------------------------------------------------------------------------------
 
-// Options specifies the sys logger settings to use when it is created.
-type Options struct {
-	AppName               string `json:"appName,omitempty"`
-	Host                  string `json:"host,omitempty"`
-	Port                  uint16 `json:"port,omitempty"`
-	UseTcp                bool   `json:"useTcp,omitempty"`
-	UseTls                bool   `json:"useTls,omitempty"`
-	UseRFC5424            bool   `json:"useRFC5424,omitempty"` // If false, use RFC3164
-	SendInfoNotifications bool   `json:"sendInfoNotifications,omitempty"`
-	TlsConfig             *tls.Config
-	ErrorHandler          ErrorHandler
-}
-
 // Logger is the object that controls file logging.
 type Logger struct {
-	mtx                   sync.Mutex
 	conn                  net.Conn
 	lastWasError          int32
 	appName               string
-	host                  string
-	port                  uint16
+	serverAddress         string
 	useTcp                bool
 	tlsConfig             *tls.Config
 	useRFC5424            bool
-	sendInfoNotifications bool
 	hostname              string
 	pid                   int
 	errorHandler          ErrorHandler
+	queuedMessagesMtx     sync.Mutex
+	queuedMessagesList    *list.List
+	maxMessageQueueSize   uint
+	wakeUpWorkerCh        chan struct{}
+	stopWorkerCh          chan struct{}
+	rundownProt           *rp.RundownProtection
+}
+
+// Options specifies the sys logger settings to use when it is created.
+type Options struct {
+	// Application name to use. Defaults to the binary name.
+	AppName               string `json:"appName,omitempty"`
+
+	// Syslog server host name
+	Host                  string `json:"host,omitempty"`
+
+	// Syslog server port. Defaults to 514, 1468 or 6514 depending on the network protocol used.
+	Port                  uint16 `json:"port,omitempty"`
+
+	// Use TCP instead of UDP
+	UseTcp                bool `json:"useTcp,omitempty"`
+
+	// Uses a secure connection. Implies TCP.
+	UseTls                bool `json:"useTls,omitempty"`
+
+	// Send messages in the new RFC 5424 format instead of the original RFC 3164 specification.
+	UseRFC5424            bool `json:"useRFC5424,omitempty"`
+
+	// Set the maximum amount of messages to keep in memory if connection to the server is lost.
+	MaxMessageQueueSize   uint `json:"queueSize,omitempty"`
+
+	// TLSConfig optionally provides a TLS configuration for use.
+	TlsConfig             *tls.Config
+
+	// A callback to call if an internal error is encountered.
+	ErrorHandler          ErrorHandler
 }
 
 // ErrorHandler is a callback to call if an internal error must be notified.
@@ -78,17 +105,26 @@ func Create(options Options) (*Logger, error) {
 			options.AppName = options.AppName[:(len(options.AppName) - extLen)]
 		}
 	}
-	options.AppName = "aaa"
 
 	// Create Syslog logger
 	logger := &Logger{
-		appName:               options.AppName,
-		useTcp:                options.UseTcp,
-		useRFC5424:            options.UseRFC5424,
-		sendInfoNotifications: options.SendInfoNotifications,
-		pid:                   os.Getpid(),
-		errorHandler:          options.ErrorHandler,
+		appName:             options.AppName,
+		useTcp:              options.UseTcp,
+		useRFC5424:          options.UseRFC5424,
+		pid:                 os.Getpid(),
+		errorHandler:        options.ErrorHandler,
+		queuedMessagesMtx:   sync.Mutex{},
+		queuedMessagesList:  list.New(),
+		maxMessageQueueSize: options.MaxMessageQueueSize,
+		wakeUpWorkerCh:      make(chan struct{}, 1),
+		stopWorkerCh:        make(chan struct{}),
+		rundownProt:         rp.Create(),
 	}
+
+	if options.MaxMessageQueueSize == 0 {
+		logger.maxMessageQueueSize = defaultMaxMessageQueueSize
+	}
+
 	if options.UseTls {
 		if options.TlsConfig != nil {
 			logger.tlsConfig = options.TlsConfig.Clone()
@@ -101,28 +137,31 @@ func Create(options Options) (*Logger, error) {
 
 	// Set the server host
 	if len(options.Host) > 0 {
-		logger.host = options.Host
+		logger.serverAddress = options.Host
 	} else {
-		logger.host = "127.0.0.1"
+		logger.serverAddress = "127.0.0.1"
 	}
 
 	// Set the server port
-	if options.Port != 0 {
-		logger.port = options.Port
-	} else {
+	port := options.Port
+	if options.Port == 0 {
 		if options.UseTcp {
 			if options.UseTls {
-				logger.port = 6514
+				port = 6514
 			} else {
-				logger.port = 1468
+				port = 1468
 			}
 		} else {
-			logger.port = 514
+			port = 514
 		}
 	}
+	logger.serverAddress += ":" + strconv.Itoa(int(port))
 
 	// Set the client host name
 	logger.hostname, _ = os.Hostname()
+
+	// Create a background messenger worker
+	go logger.messengerWorker()
 
 	// Done
 	return logger, nil
@@ -130,10 +169,18 @@ func Create(options Options) (*Logger, error) {
 
 // Destroy shuts down the syslog logger.
 func (logger *Logger) Destroy() {
-	logger.mtx.Lock()
-	defer logger.mtx.Unlock()
+	// If using TCP, stop worker messenger
+	close(logger.stopWorkerCh)
+	logger.rundownProt.Wait()
 
+	// Flush queued messages
+	logger.flushQueuedMessages()
+
+	// Disconnect from the network
 	logger.disconnect()
+
+	// Cleanup
+	close(logger.wakeUpWorkerCh)
 }
 
 // LogError sends an error message to the syslog server.
@@ -186,10 +233,102 @@ func (logger *Logger) writeString(facility int, severity int, now time.Time, msg
 			logger.hostname + " " + logger.appName + " " + strconv.Itoa(logger.pid) + " - - " + msg
 	}
 
-	// Send message to server
-	err := logger.writeBytes([]byte(formattedMessage))
+	// Queue the message
+	logger.queuedMessagesMtx.Lock()
 
-	// Handle error
+	if uint(logger.queuedMessagesList.Len()) > logger.maxMessageQueueSize {
+		elem := logger.queuedMessagesList.Front()
+		if elem != nil {
+			logger.queuedMessagesList.Remove(elem)
+		}
+	}
+	logger.queuedMessagesList.PushBack(formattedMessage)
+
+	logger.queuedMessagesMtx.Unlock()
+
+	// If the worker is sleeping it will get the wake-up signal, if not the
+	// channel will not be being read and the default case will be selected
+	select {
+	case logger.wakeUpWorkerCh <- struct{}{}:
+	default:
+	}
+}
+
+// The messenger worker do actual message delivery. The intention of this goroutine, is to
+// avoid halting the routine that sends the message if there are network issues.
+func (logger *Logger) messengerWorker() {
+	for {
+		select {
+		case <-logger.stopWorkerCh:
+			return
+		default:
+		}
+
+		// Dequeue a message
+		logger.queuedMessagesMtx.Lock()
+		elem := logger.queuedMessagesList.Front()
+		if elem != nil {
+			logger.queuedMessagesList.Remove(elem)
+		}
+		logger.queuedMessagesMtx.Unlock()
+
+		// If no message, check again just in case the signal was buffered
+		if elem == nil {
+			select {
+			case <-logger.stopWorkerCh:
+				return
+			case <-logger.wakeUpWorkerCh:
+			}
+
+			// Dequeue next message
+			logger.queuedMessagesMtx.Lock()
+			elem = logger.queuedMessagesList.Front()
+			if elem != nil {
+				logger.queuedMessagesList.Remove(elem)
+			}
+			logger.queuedMessagesMtx.Unlock()
+		}
+
+		// If we have a message, deliver it
+		if elem != nil {
+			// Try to acquire rundown protection
+			if !logger.rundownProt.Acquire() {
+				// If we cannot, we are shutting down
+				return
+			}
+
+			// Send message to server
+			err := logger.writeBytes([]byte(elem.Value.(string)))
+
+			// Handle error
+			logger.handleError(err)
+
+			// Release rundown protection
+			logger.rundownProt.Release()
+		}
+	}
+}
+
+func (logger *Logger) flushQueuedMessages() {
+	deadline := time.Now().Add(flushTimeout)
+
+	for time.Now().Before(deadline) {
+		// Dequeue next message
+		elem := logger.queuedMessagesList.Front()
+		if elem == nil {
+			break // Reached the end
+		}
+		logger.queuedMessagesList.Remove(elem)
+
+		// Send message to server
+		err := logger.writeBytes([]byte(elem.Value.(string)))
+		if err != nil {
+			break // Stop on error
+		}
+	}
+}
+
+func (logger *Logger) handleError(err error) {
 	if err == nil {
 		atomic.StoreInt32(&logger.lastWasError, 0)
 	} else {
@@ -204,15 +343,14 @@ func (logger *Logger) connect() error {
 
 	logger.disconnect()
 
-	address := logger.host + ":" + strconv.Itoa(int(logger.port))
 	if logger.useTcp {
 		if logger.tlsConfig != nil {
-			logger.conn, err = tls.Dial("tcp", address, logger.tlsConfig)
+			logger.conn, err = tls.Dial("tcp", logger.serverAddress, logger.tlsConfig)
 		} else {
-			logger.conn, err = net.Dial("tcp", address)
+			logger.conn, err = net.Dial("tcp", logger.serverAddress)
 		}
 	} else {
-		logger.conn, err = net.Dial("udp", address)
+		logger.conn, err = net.Dial("udp", logger.serverAddress)
 	}
 
 	return err
@@ -228,14 +366,11 @@ func (logger *Logger) disconnect() {
 func (logger *Logger) writeBytes(b []byte) error {
 	var err error
 
-	// Lock access
-	logger.mtx.Lock()
-
 	// Send the message if connected
 	if logger.conn != nil {
 		_, err = logger.conn.Write(b)
 		if err == nil {
-			goto Done
+			return nil
 		}
 	}
 
@@ -247,10 +382,6 @@ func (logger *Logger) writeBytes(b []byte) error {
 			logger.disconnect()
 		}
 	}
-
-Done:
-	// Unlock access
-	logger.mtx.Unlock()
 
 	// Done
 	return err
