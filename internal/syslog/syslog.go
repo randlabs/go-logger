@@ -58,13 +58,13 @@ type Options struct {
 	// Application name to use. Defaults to the binary name.
 	AppName               string `json:"appName,omitempty"`
 
-	// Syslog server host name
+	// Syslog server host name.
 	Host                  string `json:"host,omitempty"`
 
 	// Syslog server port. Defaults to 514, 1468 or 6514 depending on the network protocol used.
 	Port                  uint16 `json:"port,omitempty"`
 
-	// Use TCP instead of UDP
+	// Use TCP instead of UDP.
 	UseTcp                bool `json:"useTcp,omitempty"`
 
 	// Uses a secure connection. Implies TCP.
