@@ -2,7 +2,6 @@ package file
 
 import (
 	"fmt"
-	"github.com/randlabs/go-logger/internal/util"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -11,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/randlabs/go-logger/internal/util"
 )
 
 //------------------------------------------------------------------------------
@@ -55,7 +56,6 @@ func init() {
 	if runtime.GOOS == "windows" {
 		newLine = "\r\n"
 	}
-	return
 }
 
 //------------------------------------------------------------------------------
