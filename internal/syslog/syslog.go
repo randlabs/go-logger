@@ -218,9 +218,7 @@ func (logger *Logger) writeString(facility int, severity int, now time.Time, msg
 			msg = msg + "\n"
 		}
 	} else {
-		if strings.HasSuffix(msg, "\n") {
-			msg = msg[:len(msg)-1]
-		}
+		msg = strings.TrimSuffix(msg, "\n")
 	}
 
 	// Format the message

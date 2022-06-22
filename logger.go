@@ -15,10 +15,10 @@ type LogLevel uint
 
 const (
 	LogLevelQuiet   LogLevel = 0
-	LogLevelError            = 1
-	LogLevelWarning          = 2
-	LogLevelInfo             = 3
-	LogLevelDebug            = 4
+	LogLevelError   LogLevel = 1
+	LogLevelWarning LogLevel = 2
+	LogLevelInfo    LogLevel = 3
+	LogLevelDebug   LogLevel = 4
 )
 
 // Logger is the object that controls logging.
