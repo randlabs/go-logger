@@ -8,10 +8,18 @@ import (
 
 //------------------------------------------------------------------------------
 
-// NOTE: This function is only called if the logger has an error handler callback.
-func (logger *Logger) forwardLogError(message string) {
-	logger.errorHandler(message)
+type globalOptions struct {
+	// Set the initial logging level to use.
+	Level LogLevel
+
+	// Set the initial logging level for debug output to use.
+	DebugLevel uint
+
+	// A callback to call if an internal error is encountered.
+	ErrorHandler ErrorHandler
 }
+
+//------------------------------------------------------------------------------
 
 func (logger *Logger) getTimestamp() time.Time {
 	now := time.Now()

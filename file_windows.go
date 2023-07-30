@@ -1,4 +1,4 @@
-package file
+package go_logger
 
 import (
 	"os"
@@ -8,7 +8,13 @@ import (
 
 //------------------------------------------------------------------------------
 
-func getFileCreationtime(fi os.FileInfo) time.Time {
+const (
+	newLine = "\r\n"
+)
+
+//------------------------------------------------------------------------------
+
+func getFileCreationTime(fi os.FileInfo) time.Time {
 	stat := fi.Sys().(*syscall.Win32FileAttributeData)
 	return time.Unix(0, stat.CreationTime.Nanoseconds())
 }

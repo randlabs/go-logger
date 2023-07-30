@@ -2,43 +2,64 @@
 
 Yet another Go logger library.
 
+### Version 2
+
+The new version of this library implements some breaking changes:
+
+* The initialization options contains some changes. Once the logger is initialized, the rest of the code should be
+  compatible with the `v1` version.
+* Added per-target logging level. Now you can optionally specify a different logging level for console and file logging.
+  For example, you can just send limited logs to a third-party provider to avoid high costs and keep a detailed local
+  file log for debugging purposes. 
+* `timestamp` and `level` fields are always added to a JSON log. DO NOT include them when the input is a struct.
+* Verbosity level for the default logger is now `Info` instead of `Warning`.
+
 ## How to use
 
 1. Import the library
 
 ```golang
 import (
-        gologger "github.com/randlabs/go-logger"
+    logger "github.com/randlabs/go-logger/v2"
 )
 ```
 
-2. Then use `gologger.Create` to create a logger object with desired options.
-3. Optionally, you can also use the default logger which outputs only to console by accesing `gologger.Default()`.
+2. Then use `logger.Create` to create a logger object with desired options.
+3. Optionally, you can also use the default logger which outputs only to console by accessing `logger.Default()`.
 
 ## Logger options:
 
 The `Options` struct accepts several modifiers that affects the logger behavior:
 
-| Field            | Meaning                                                 |
-|------------------|---------------------------------------------------------|
-| `DisableConsole` | Disable console output.                                 |
-| `FileLog`        | Enable file logging. Optional. Details below.           |
-| `SysLog`         | Enable SysLog logging. Optional. Details below.         |
-| `Level`          | Set the initial logging level to use.                   |
-| `DebugLevel`     | Set the initial logging level for debug output to use.  |
-| `UseLocalTime`   | Use the local computer time instead of UTC.             |
-| `ErrorHandler`   | A callback to call if an internal error is encountered. |
+| Field          | Meaning                                                 |
+|----------------|---------------------------------------------------------|
+| `Console`      | Establishes some options for the console output.        |
+| `File`         | Enable file logging. Optional. Details below.           |
+| `SysLog`       | Enable SysLog logging. Optional. Details below.         |
+| `Level`        | Set the initial logging level to use.                   |
+| `DebugLevel`   | Set the initial logging level for debug output to use.  |
+| `UseLocalTime` | Use the local computer time instead of UTC.             |
+| `ErrorHandler` | A callback to call if an internal error is encountered. |
 
-The `FileOptions` struct accepts the following parameters:
+#### ConsoleOptions:
+
+| Field        | Meaning                                                               |
+|--------------|-----------------------------------------------------------------------|
+| `Disable`    | Disabled console output.                                              |
+| `Level`      | Optional logging level to use in the console output.                  |
+| `DebugLevel` | Optional logging level for debug output to use in the console output. |
+
+#### FileOptions:
 
 | Field        | Meaning                                                                     |
 |--------------|-----------------------------------------------------------------------------|
 | `Prefix`     | Filename prefix to use when a file is created. Defaults to the binary name. |
 | `Directory`  | Destination directory to store log files.                                   |
-| `DaysToKeep` | Amount of days to keep old logs,                                            |
+| `DaysToKeep` | Amount of days to keep old logs.                                            |
+| `Level`      | Optional logging level to use in the file output.                           |
+| `DebugLevel` | Optional logging level for debug output to use in the file output.          |
 
-And the `SysLogOptions` struct accepts the following parameters:
-
+#### SysLogOptions:
 
 | Field                 | Meaning                                                                                   |
 |-----------------------|-------------------------------------------------------------------------------------------|
@@ -50,6 +71,8 @@ And the `SysLogOptions` struct accepts the following parameters:
 | `UseRFC5424`          | Send messages in the new RFC 5424 format instead of the original RFC 3164 specification.  |
 | `MaxMessageQueueSize` | Set the maximum amount of messages to keep in memory if connection to the server is lost. |
 | `TlsConfig`           | An optional pointer to a `tls.Config` object to provide the TLS configuration for use.    |
+| `Level`               | Optional logging level to use in the syslog output.                                       |
+| `DebugLevel`          | Optional logging level for debug output to use in the syslog output.                      |
 
 ## Example
 
@@ -58,10 +81,8 @@ package example
 
 import (
     "fmt"
-    "os"
-    "path/filepath"
 
-    gologger "github.com/randlabs/go-logger"
+    logger "github.com/randlabs/go-logger/v2"
 )
 
 // Define a custom JSON message. Timestamp and level will be automatically added by the logger.
@@ -71,43 +92,43 @@ type JsonMessage struct {
 
 func main() {
     // Create the logger
-    logger, err := gologger.Create(gologger.Options{
-        FileLog: &gologger.FileOptions{
+    lg, err := logger.Create(logger.Options{
+        File: &logger.FileOptions{
             Directory:  "./logs",
             DaysToKeep: 7,
         },
-        Level:        gologger.LogLevelDebug,
+        Level:        logger.LogLevelDebug,
         DebugLevel:   1,
     })
     if err != nil {
         // Use default logger to send the error
-        gologger.Default().Error(fmt.Sprintf("unable to initialize. [%v]", err))
+        logger.Default().Error(fmt.Sprintf("unable to initialize. [%v]", err))
         return
     }
     // Defer logger shut down
-    defer logger.Destroy()
+    defer lg.Destroy()
 
     // Send some logs using the plain text format 
-    logger.Error("This is an error message sample")
-    logger.Warning("This is a warning message sample")
-    logger.Info("This is an information message sample")
-    logger.Debug(1, "This is a debug message sample at level 1 which should be printed")
-    logger.Debug(2, "This is a debug message sample at level 2 which should NOT be printed")
+    lg.Error("This is an error message sample")
+    lg.Warning("This is a warning message sample")
+    lg.Info("This is an information message sample")
+    lg.Debug(1, "This is a debug message sample at level 1 which should be printed")
+    lg.Debug(2, "This is a debug message sample at level 2 which should NOT be printed")
 
     // Send some other logs using the JSON format 
-    logger.Error(JsonMessage{
+    lg.Error(JsonMessage{
         Message: "This is an error message sample",
     })
-    logger.Warning(JsonMessage{
+    lg.Warning(JsonMessage{
         Message: "This is a warning message sample",
     })
-    logger.Info(JsonMessage{
+    lg.Info(JsonMessage{
         Message: "This is an information message sample",
     })
-    logger.Debug(1, JsonMessage{
+    lg.Debug(1, JsonMessage{
         Message: "This is a debug message sample at level 1 which should be printed",
     })
-    logger.Debug(2, JsonMessage{
+    lg.Debug(2, JsonMessage{
         Message: "This is a debug message sample at level 2 which should NOT be printed",
     })
 }
