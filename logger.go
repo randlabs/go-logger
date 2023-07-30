@@ -2,10 +2,6 @@ package go_logger
 
 import (
 	"sync"
-
-	"github.com/randlabs/go-logger/internal/console"
-	"github.com/randlabs/go-logger/internal/file"
-	"github.com/randlabs/go-logger/internal/syslog"
 )
 
 //------------------------------------------------------------------------------
@@ -24,47 +20,39 @@ const (
 // Logger is the object that controls logging.
 type Logger struct {
 	mtx            sync.RWMutex
-	level          LogLevel
-	debugLevel     uint
-	disableConsole bool
-	file           *file.Logger
-	syslog         *syslog.Logger
+	//level          LogLevel
+	//debugLevel     uint
+	//disableConsole bool
+	adapters       []internalLogger
 	useLocalTime   bool
-	errorHandler   ErrorHandler
 }
 
 // Options specifies the logger settings to use when initialized.
 type Options struct {
-	// Disable console output.
-	DisableConsole bool `json:"disableConsole,omitempty"`
+	// Optionally establish console logging settings.
+	Console ConsoleOptions `json:"console,omitempty"`
 
 	// Optionally enable file logging and establish its settings.
-	FileLog        *FileOptions `json:"fileLog,omitempty"`
+	File *FileOptions `json:"file,omitempty"`
 
 	// Optionally enable syslog logging and establish its settings.
-	SysLog         *SyslogOptions `json:"sysLog,omitempty"`
+	SysLog *SysLogOptions `json:"sysLog,omitempty"`
 
 	// Set the initial logging level to use.
-	Level          LogLevel `json:"level,omitempty"`
+	Level LogLevel `json:"level,omitempty"`
 
 	// Set the initial logging level for debug output to use.
-	DebugLevel     uint `json:"debugLevel,omitempty"`
+	DebugLevel uint `json:"debugLevel,omitempty"`
 
 	// Use the local computer time instead of UTC.
-	UseLocalTime   bool `json:"useLocalTime,omitempty"`
+	UseLocalTime  bool `json:"useLocalTime,omitempty"`
 
 	// A callback to call if an internal error is encountered.
-	ErrorHandler   ErrorHandler
+	ErrorHandler ErrorHandler
 }
 
 // ErrorHandler is a callback to call if an internal error must be notified.
 type ErrorHandler func(message string)
-
-// FileOptions specifies the file logger settings.
-type FileOptions file.Options
-
-// SyslogOptions specifies the syslog logger settings.
-type SyslogOptions syslog.Options
 
 //------------------------------------------------------------------------------
 
@@ -79,200 +67,196 @@ var (
 func Default() *Logger {
 	defaultLoggerInit.Do(func() {
 		defaultLogger, _ = Create(Options{
-			Level: LogLevelWarning,
+			Level: LogLevelInfo,
 		})
 	})
 	return defaultLogger
 }
 
+// WithLevel is a helper to set up a log level override.
+func WithLevel(level LogLevel) *LogLevel {
+	return &level
+}
+
+// WithDebugLevel is a helper to set up a debug log level override.
+func WithDebugLevel(debugLevel uint) *uint {
+	return &debugLevel
+}
+
 // Create creates a new logger.
-func Create(options Options) (*Logger, error) {
-	var err error
-
-	// Create file logger
-	logger := &Logger{
-		mtx:            sync.RWMutex{},
-		level:          options.Level,
-		debugLevel:     options.DebugLevel,
-		disableConsole: options.DisableConsole,
-		errorHandler:   options.ErrorHandler,
+func Create(opts Options) (*Logger, error) {
+	// Create logger
+	lg := &Logger{
+		mtx:      sync.RWMutex{},
+		adapters: make([]internalLogger, 0),
 	}
 
-	// Create file logger if options were specified
-	if options.FileLog != nil {
-		fileOpts := file.Options(*options.FileLog)
-		if fileOpts.ErrorHandler == nil && logger.errorHandler != nil {
-			fileOpts.ErrorHandler = logger.forwardLogError
-		}
-
-		logger.file, err = file.Create(fileOpts)
-		if err != nil {
-			logger.Destroy()
-			return nil, err
-		}
+	// Initialize global options
+	glbOpts := globalOptions{
+		Level:        opts.Level,
+		DebugLevel:   opts.DebugLevel,
+		ErrorHandler: opts.ErrorHandler,
 	}
 
-	// Create syslog logger if options were specified
-	if options.SysLog != nil {
-		syslogOpts := syslog.Options(*options.SysLog)
-		if syslogOpts.ErrorHandler == nil && logger.errorHandler != nil {
-			syslogOpts.ErrorHandler = logger.forwardLogError
-		}
+	// Create console adapter
+	if !opts.Console.Disable {
+		adapter := createConsoleAdapter(opts.Console, glbOpts)
 
-		logger.syslog, err = syslog.Create(syslogOpts)
+		// Add to list of adapters
+		lg.adapters = append(lg.adapters, adapter)
+	}
+
+	// Create file adapter if opts were specified
+	if opts.File != nil {
+		adapter, err := createFileAdapter(*opts.File, glbOpts)
 		if err != nil {
-			logger.Destroy()
+			lg.Destroy()
 			return nil, err
 		}
+
+		// Add to list of adapters
+		lg.adapters = append(lg.adapters, adapter)
+	}
+
+	// Create syslog adapter if opts were specified
+	if opts.SysLog != nil {
+		adapter, err := createSysLogAdapter(*opts.SysLog, glbOpts)
+		if err != nil {
+			lg.Destroy()
+			return nil, err
+		}
+
+		// Add to list of adapters
+		lg.adapters = append(lg.adapters, adapter)
 	}
 
 	// Done
-	return logger, nil
+	return lg, nil
 }
 
 // Destroy shuts down the logger.
-func (logger *Logger) Destroy() {
+func (lg *Logger) Destroy() {
 	// The default logger cannot be destroyed
-	if logger == defaultLogger {
+	if lg == defaultLogger {
 		return
 	}
 
-	if logger.syslog != nil {
-		logger.syslog.Destroy()
-		logger.syslog = nil
+	// Destroy all adapters
+	for _, adapter := range lg.adapters {
+		adapter.destroy()
 	}
-	if logger.file != nil {
-		logger.file.Destroy()
-		logger.file = nil
-	}
+	lg.adapters = nil
 }
 
 // SetLevel sets the minimum level for all messages.
-func (logger *Logger) SetLevel(newLevel LogLevel) {
+func (lg *Logger) SetLevel(level LogLevel, debugLevel uint, class string) {
 	// Lock access
-	logger.mtx.Lock()
-	defer logger.mtx.Unlock()
+	lg.mtx.Lock()
+	defer lg.mtx.Unlock()
 
-	logger.level = newLevel
-}
-
-// SetDebugLevel sets the minimum level for debug messages.
-func (logger *Logger) SetDebugLevel(newLevel uint) {
-	// Lock access
-	logger.mtx.Lock()
-	defer logger.mtx.Unlock()
-
-	logger.debugLevel = newLevel
+	for _, adapter := range lg.adapters {
+		if class == "" || class == "all" || class == adapter.class() {
+			adapter.setLevel(level, debugLevel)
+		}
+	}
 }
 
 // Error emits an error message into the configured targets.
 // If a string is passed, output format will be in DATE [LEVEL] MESSAGE.
 // If a struct is passed, output will be in json with level and timestamp fields automatically added.
-func (logger *Logger) Error(obj interface{}) {
+func (lg *Logger) Error(obj interface{}) {
 	// Lock access
-	logger.mtx.RLock()
+	lg.mtx.RLock()
 
-	if logger.level >= LogLevelError {
-		msg, isJSON, ok := logger.parseObj(obj)
-		if ok {
-			now := logger.getTimestamp()
+	msg, isJSON, ok := lg.parseObj(obj)
+	if ok {
+		now := lg.getTimestamp()
+		raw := false
+		if isJSON {
+			msg = addPayloadToJSON(msg, now, "error")
+			raw = true
+		}
 
-			if !logger.disableConsole {
-				console.LogError(now, msg, isJSON)
-			}
-			if logger.file != nil {
-				logger.file.LogError(now, msg, isJSON)
-			}
-			if logger.syslog != nil {
-				logger.syslog.LogError(now, msg, isJSON)
-			}
+		for _, adapter := range lg.adapters {
+			adapter.logError(now, msg, raw)
 		}
 	}
 
 	// Unlock access
-	logger.mtx.RUnlock()
+	lg.mtx.RUnlock()
 }
 
 // Warning emits a warning message into the configured targets.
 // If a string is passed, output format will be in DATE [LEVEL] MESSAGE.
 // If a struct is passed, output will be in json with level and timestamp fields automatically added.
-func (logger *Logger) Warning(obj interface{}) {
+func (lg *Logger) Warning(obj interface{}) {
 	// Lock access
-	logger.mtx.RLock()
+	lg.mtx.RLock()
 
-	if logger.level >= LogLevelWarning {
-		msg, isJSON, ok := logger.parseObj(obj)
-		if ok {
-			now := logger.getTimestamp()
+	msg, isJSON, ok := lg.parseObj(obj)
+	if ok {
+		now := lg.getTimestamp()
+		raw := false
+		if isJSON {
+			msg = addPayloadToJSON(msg, now, "warning")
+			raw = true
+		}
 
-			if !logger.disableConsole {
-				console.LogWarning(now, msg, isJSON)
-			}
-			if logger.file != nil {
-				logger.file.LogWarning(now, msg, isJSON)
-			}
-			if logger.syslog != nil {
-				logger.syslog.LogWarning(now, msg, isJSON)
-			}
+		for _, adapter := range lg.adapters {
+			adapter.logWarning(now, msg, raw)
 		}
 	}
 
 	// Unlock access
-	logger.mtx.RUnlock()
+	lg.mtx.RUnlock()
 }
 
 // Info emits an information message into the configured targets.
 // If a string is passed, output format will be in DATE [LEVEL] MESSAGE.
 // If a struct is passed, output will be in json with level and timestamp fields automatically added.
-func (logger *Logger) Info(obj interface{}) {
+func (lg *Logger) Info(obj interface{}) {
 	// Lock access
-	logger.mtx.RLock()
+	lg.mtx.RLock()
 
-	if logger.level >= LogLevelInfo {
-		msg, isJSON, ok := logger.parseObj(obj)
-		if ok {
-			now := logger.getTimestamp()
+	msg, isJSON, ok := lg.parseObj(obj)
+	if ok {
+		now := lg.getTimestamp()
+		raw := false
+		if isJSON {
+			msg = addPayloadToJSON(msg, now, "info")
+			raw = true
+		}
 
-			if !logger.disableConsole {
-				console.LogInfo(now, msg, isJSON)
-			}
-			if logger.file != nil {
-				logger.file.LogInfo(now, msg, isJSON)
-			}
-			if logger.syslog != nil {
-				logger.syslog.LogInfo(now, msg, isJSON)
-			}
+		for _, adapter := range lg.adapters {
+			adapter.logInfo(now, msg, raw)
 		}
 	}
 
 	// Unlock access
-	logger.mtx.RUnlock()
+	lg.mtx.RUnlock()
 }
 
 // Debug emits a debug message into the configured targets.
 // If a string is passed, output format will be in DATE [LEVEL] MESSAGE.
 // If a struct is passed, output will be in json with level and timestamp fields automatically added.
-func (logger *Logger) Debug(level uint, obj interface{}) {
+func (lg *Logger) Debug(level uint, obj interface{}) {
 	// Lock access
-	logger.mtx.RLock()
+	lg.mtx.RLock()
 
-	if logger.level >= LogLevelDebug && logger.debugLevel >= level {
-		msg, isJSON, ok := logger.parseObj(obj)
-		if ok {
-			now := logger.getTimestamp()
+	msg, isJSON, ok := lg.parseObj(obj)
+	if ok {
+		now := lg.getTimestamp()
+		raw := false
+		if isJSON {
+			msg = addPayloadToJSON(msg, now, "debug")
+			raw = true
+		}
 
-			if !logger.disableConsole {
-				console.LogDebug(now, msg, isJSON)
-			}
-			if logger.file != nil {
-				logger.file.LogDebug(now, msg, isJSON)
-			}
-			if logger.syslog != nil {
-				logger.syslog.LogDebug(now, msg, isJSON)
-			}
+		for _, adapter := range lg.adapters {
+			adapter.logDebug(level, now, msg, raw)
 		}
 	}
 
 	// Unlock access
-	logger.mtx.RUnlock()
+	lg.mtx.RUnlock()
 }

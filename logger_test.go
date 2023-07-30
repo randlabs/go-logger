@@ -5,13 +5,31 @@ import (
 	"path/filepath"
 	"testing"
 
-	gologger "github.com/randlabs/go-logger"
+	logger "github.com/randlabs/go-logger/v2"
 )
 
 //------------------------------------------------------------------------------
 
 func TestDefault(t *testing.T) {
-	printTestMessages(gologger.Default())
+	printTestMessages(logger.Default())
+}
+
+func TestLevelOverride(t *testing.T) {
+	lg, err := logger.Create(logger.Options{
+		Console: logger.ConsoleOptions{
+			Level: logger.WithLevel(logger.LogLevelError),
+		},
+		Level:        logger.LogLevelDebug,
+		DebugLevel:   1,
+		UseLocalTime: false,
+	})
+	if err != nil {
+		t.Errorf("unable to initialize. [%v]", err)
+		return
+	}
+	defer lg.Destroy()
+
+	printTestMessages(lg)
 }
 
 func TestFileLog(t *testing.T) {
@@ -19,13 +37,16 @@ func TestFileLog(t *testing.T) {
 		_ = os.RemoveAll(dir)
 	}
 
-	logger, err := gologger.Create(gologger.Options{
-		DisableConsole: true,
-		FileLog: &gologger.FileOptions{
+	lg, err := logger.Create(logger.Options{
+		Console: logger.ConsoleOptions{
+			Disable: true,
+		},
+		File: &logger.FileOptions{
+			Prefix:     "Test",
 			Directory:  "./testdata/logs",
 			DaysToKeep: 7,
 		},
-		Level:        gologger.LogLevelDebug,
+		Level:        logger.LogLevelDebug,
 		DebugLevel:   1,
 		UseLocalTime: false,
 	})
@@ -33,20 +54,21 @@ func TestFileLog(t *testing.T) {
 		t.Errorf("unable to initialize. [%v]", err)
 		return
 	}
+	defer lg.Destroy()
 
-	printTestMessages(logger)
-
-	logger.Destroy()
+	printTestMessages(lg)
 }
 
 func TestSysLogUDP(t *testing.T) {
-	logger, err := gologger.Create(gologger.Options{
-		DisableConsole: true,
-		SysLog: &gologger.SyslogOptions{
+	lg, err := logger.Create(logger.Options{
+		Console: logger.ConsoleOptions{
+			Disable: true,
+		},
+		SysLog: &logger.SysLogOptions{
 			Host: "127.0.0.1",
 			Port: 514,
 		},
-		Level:        gologger.LogLevelDebug,
+		Level:        logger.LogLevelDebug,
 		DebugLevel:   1,
 		UseLocalTime: false,
 	})
@@ -54,21 +76,22 @@ func TestSysLogUDP(t *testing.T) {
 		t.Errorf("unable to initialize. [%v]", err)
 		return
 	}
+	defer lg.Destroy()
 
-	printTestMessages(logger)
-
-	logger.Destroy()
+	printTestMessages(lg)
 }
 
 func TestSysLogTCP(t *testing.T) {
-	logger, err := gologger.Create(gologger.Options{
-		DisableConsole: true,
-		SysLog: &gologger.SyslogOptions{
+	lg, err := logger.Create(logger.Options{
+		Console: logger.ConsoleOptions{
+			Disable: true,
+		},
+		SysLog: &logger.SysLogOptions{
 			Host:   "127.0.0.1",
 			Port:   1468,
 			UseTcp: true,
 		},
-		Level:        gologger.LogLevelDebug,
+		Level:        logger.LogLevelDebug,
 		DebugLevel:   1,
 		UseLocalTime: false,
 	})
@@ -76,10 +99,9 @@ func TestSysLogTCP(t *testing.T) {
 		t.Errorf("unable to initialize. [%v]", err)
 		return
 	}
+	defer lg.Destroy()
 
-	printTestMessages(logger)
-
-	logger.Destroy()
+	printTestMessages(lg)
 }
 
 //------------------------------------------------------------------------------
@@ -89,26 +111,26 @@ type JsonMessage struct {
 	Message string `json:"message"`
 }
 
-func printTestMessages(logger *gologger.Logger) {
-	logger.Error("This is an error message sample")
-	logger.Warning("This is a warning message sample")
-	logger.Info("This is an information message sample")
-	logger.Debug(1, "This is a debug message sample at level 1 which should be printed")
-	logger.Debug(2, "This is a debug message sample at level 2 which should NOT be printed")
+func printTestMessages(l *logger.Logger) {
+	l.Error("This is an error message sample")
+	l.Warning("This is a warning message sample")
+	l.Info("This is an information message sample")
+	l.Debug(1, "This is a debug message sample at level 1 which should be printed")
+	l.Debug(2, "This is a debug message sample at level 2 which should NOT be printed")
 
-	logger.Error(JsonMessage{
+	l.Error(JsonMessage{
 		Message: "This is an error message sample",
 	})
-	logger.Warning(JsonMessage{
+	l.Warning(JsonMessage{
 		Message: "This is a warning message sample",
 	})
-	logger.Info(JsonMessage{
+	l.Info(JsonMessage{
 		Message: "This is an information message sample",
 	})
-	logger.Debug(1, JsonMessage{
+	l.Debug(1, JsonMessage{
 		Message: "This is a debug message sample at level 1 which should be printed",
 	})
-	logger.Debug(2, JsonMessage{
+	l.Debug(2, JsonMessage{
 		Message: "This is a debug message sample at level 2 which should NOT be printed",
 	})
 }
