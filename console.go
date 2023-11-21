@@ -42,10 +42,10 @@ func createConsoleAdapter(opts ConsoleOptions, glbOpts globalOptions) internalLo
 	}
 
 	if color.IsSupportColor() {
-		lg.themedLevels[0] = color.Error.Sprintf("[ERROR]")
-		lg.themedLevels[1] = color.Warn.Sprintf("[WARN]")
-		lg.themedLevels[2] = color.Info.Sprintf("[INFO]")
-		lg.themedLevels[3] = color.Debug.Sprintf("[DEBUG]")
+		lg.themedLevels[0] = color.New(color.OpBlink, color.FgLightWhite, color.BgRed).Sprintf("[ERROR]")
+		lg.themedLevels[1] = color.New(color.FgLightYellow).Sprintf("[WARN]")
+		lg.themedLevels[2] = color.New(color.FgLightGreen).Sprintf("[INFO]")
+		lg.themedLevels[3] = color.New(color.FgCyan).Sprintf("[DEBUG]")
 	} else {
 		lg.themedLevels[0] = "[ERROR]"
 		lg.themedLevels[1] = "[WARN]"
