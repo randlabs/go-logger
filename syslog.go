@@ -12,8 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	rp "github.com/randlabs/rundown-protection"
 )
 
 //------------------------------------------------------------------------------
@@ -67,22 +65,22 @@ type SysLogOptions struct {
 }
 
 type syslogAdapter struct {
-	conn                  net.Conn
-	lastWasError          int32
-	appName               string
-	serverAddress         string
-	useTcp                bool
-	tlsConfig             *tls.Config
-	useRFC5424            bool
-	hostname              string
-	pid                   int
-	queuedMessagesMtx     sync.Mutex
-	queuedMessagesList    *list.List
-	maxMessageQueueSize   uint
-	wakeUpWorkerCh        chan struct{}
-	stopWorkerCh          chan struct{}
-	rundownProt           *rp.RundownProtection
-	globals               globalOptions
+	conn          net.Conn
+	lastWasError  int32
+	appName       string
+	serverAddress string
+	useTcp        bool
+	tlsConfig     *tls.Config
+	useRFC5424    bool
+	hostname      string
+	pid           int
+	mtx           sync.Mutex
+	queue         *list.List
+	notEmptyCond  *sync.Cond
+	maxQueueSize  uint
+	shutdown      int32
+	workerDoneCh  chan struct{}
+	globals       globalOptions
 }
 
 //------------------------------------------------------------------------------
@@ -106,18 +104,17 @@ func createSysLogAdapter(opts SysLogOptions, glbOpts globalOptions) (internalLog
 
 	// Create Syslog adapter
 	lg := &syslogAdapter{
-		appName:             opts.AppName,
-		useTcp:              opts.UseTcp,
-		useRFC5424:          opts.UseRFC5424,
-		pid:                 os.Getpid(),
-		queuedMessagesMtx:   sync.Mutex{},
-		queuedMessagesList:  list.New(),
-		maxMessageQueueSize: opts.MaxMessageQueueSize,
-		wakeUpWorkerCh:      make(chan struct{}, 1),
-		stopWorkerCh:        make(chan struct{}),
-		rundownProt:         rp.Create(),
-		globals:             glbOpts,
+		appName:      opts.AppName,
+		useTcp:       opts.UseTcp,
+		useRFC5424:   opts.UseRFC5424,
+		pid:          os.Getpid(),
+		mtx:          sync.Mutex{},
+		queue:        list.New(),
+		maxQueueSize: opts.MaxMessageQueueSize,
+		workerDoneCh: make(chan struct{}),
+		globals:      glbOpts,
 	}
+	lg.notEmptyCond = sync.NewCond(&lg.mtx)
 
 	// Set output level based on globals or overrides
 	if opts.Level != nil {
@@ -129,7 +126,7 @@ func createSysLogAdapter(opts SysLogOptions, glbOpts globalOptions) (internalLog
 	}
 
 	if opts.MaxMessageQueueSize == 0 {
-		lg.maxMessageQueueSize = defaultMaxMessageQueueSize
+		lg.maxQueueSize = defaultMaxMessageQueueSize
 	}
 
 	if opts.UseTls {
@@ -179,22 +176,19 @@ func (lg *syslogAdapter) class() string {
 }
 
 func (lg *syslogAdapter) destroy() {
-	// If using TCP, stop worker messenger
-	close(lg.stopWorkerCh)
+	// Stop worker
+	atomic.StoreInt32(&lg.shutdown, 1)
+	lg.notEmptyCond.Broadcast()
 
-	lg.rundownProt.Wait()
+	// Wait until exited
+	<-lg.workerDoneCh
+	close(lg.workerDoneCh)
 
 	// Flush queued messages
-	lg.flushQueuedMessages()
+	lg.flushQueue()
 
 	// Disconnect from the network
 	lg.disconnect()
-
-	// Cleanup
-	close(lg.wakeUpWorkerCh)
-
-	lg.wakeUpWorkerCh = nil
-	lg.stopWorkerCh = nil
 }
 
 func (lg *syslogAdapter) setLevel(level LogLevel, debugLevel uint) {
@@ -227,8 +221,6 @@ func (lg *syslogAdapter) logDebug(level uint, now time.Time, msg string, raw boo
 }
 
 func (lg *syslogAdapter) writeString(facility int, severity int, now time.Time, msg string, _ bool) {
-	var formattedMessage string
-
 	// Establish priority
 	priority := (facility * 8) + severity
 
@@ -241,34 +233,49 @@ func (lg *syslogAdapter) writeString(facility int, severity int, now time.Time, 
 		msg = strings.TrimSuffix(msg, "\n")
 	}
 
-	// Format the message
+	// Format and queue the message
 	// NOTE: We don't need to care here about the message type because level and timestamp are in separate fields.
 	if !lg.useRFC5424 {
-		formattedMessage = "<" + strconv.Itoa(priority) + ">" + now.Format("Jan _2 15:04:05") + " " +
-			lg.hostname + " " + msg
+		lg.queueMessage("<" + strconv.Itoa(priority) + ">" + now.Format("Jan _2 15:04:05") + " " +
+			lg.hostname + " " + msg)
 	} else {
-		formattedMessage = "<" + strconv.Itoa(priority) + ">1 " + now.Format("2006-02-01T15:04:05Z") + " " +
-			lg.hostname + " " + lg.appName + " " + strconv.Itoa(lg.pid) + " - - " + msg
+		lg.queueMessage("<" + strconv.Itoa(priority) + ">1 " + now.Format("2006-02-01T15:04:05Z") + " " +
+			lg.hostname + " " + lg.appName + " " + strconv.Itoa(lg.pid) + " - - " + msg)
 	}
+}
 
-	// Queue the message
-	lg.queuedMessagesMtx.Lock()
+func (lg *syslogAdapter) queueMessage(msg string) {
+	lg.mtx.Lock()
+	defer lg.mtx.Unlock()
 
-	if uint(lg.queuedMessagesList.Len()) > lg.maxMessageQueueSize {
-		elem := lg.queuedMessagesList.Front()
+	if uint(lg.queue.Len()) > lg.maxQueueSize {
+		elem := lg.queue.Front()
 		if elem != nil {
-			lg.queuedMessagesList.Remove(elem)
+			lg.queue.Remove(elem)
 		}
 	}
-	lg.queuedMessagesList.PushBack(formattedMessage)
+	lg.queue.PushBack(msg)
 
-	lg.queuedMessagesMtx.Unlock()
+	// Wake up worker if needed
+	lg.notEmptyCond.Signal()
+}
 
-	// If the worker is sleeping it will get the wake-up signal, if not the
-	// channel will not be being read and the default case will be selected
-	select {
-	case lg.wakeUpWorkerCh <- struct{}{}:
-	default:
+func (lg *syslogAdapter) dequeueMessage() (string, bool) {
+	lg.mtx.Lock()
+	defer lg.mtx.Unlock()
+
+	for {
+		if atomic.LoadInt32(&lg.shutdown) != 0 {
+			return "", true
+		}
+
+		elem := lg.queue.Front()
+		if elem != nil {
+			lg.queue.Remove(elem)
+			return elem.Value.(string), false
+		}
+
+		lg.notEmptyCond.Wait()
 	}
 }
 
@@ -276,67 +283,30 @@ func (lg *syslogAdapter) writeString(facility int, severity int, now time.Time, 
 // avoid halting the routine that sends the message if there are network issues.
 func (lg *syslogAdapter) messengerWorker() {
 	for {
-		select {
-		case <-lg.stopWorkerCh:
+		msg, quit := lg.dequeueMessage()
+		if quit {
+			lg.workerDoneCh <- struct {}{}
 			return
-		default:
 		}
 
-		// Dequeue a message
-		lg.queuedMessagesMtx.Lock()
-		elem := lg.queuedMessagesList.Front()
-		if elem != nil {
-			lg.queuedMessagesList.Remove(elem)
-		}
-		lg.queuedMessagesMtx.Unlock()
+		// Send message to server
+		err := lg.writeBytes([]byte(msg))
 
-		// If no message, check again just in case the signal was buffered
-		if elem == nil {
-			select {
-			case <-lg.stopWorkerCh:
-				return
-			case <-lg.wakeUpWorkerCh:
-			}
-
-			// Dequeue next message
-			lg.queuedMessagesMtx.Lock()
-			elem = lg.queuedMessagesList.Front()
-			if elem != nil {
-				lg.queuedMessagesList.Remove(elem)
-			}
-			lg.queuedMessagesMtx.Unlock()
-		}
-
-		// If we have a message, deliver it
-		if elem != nil {
-			// Try to acquire rundown protection
-			if !lg.rundownProt.Acquire() {
-				// If we cannot, we are shutting down
-				return
-			}
-
-			// Send message to server
-			err := lg.writeBytes([]byte(elem.Value.(string)))
-
-			// Handle error
-			lg.handleError(err)
-
-			// Release rundown protection
-			lg.rundownProt.Release()
-		}
+		// Handle error
+		lg.handleError(err)
 	}
 }
 
-func (lg *syslogAdapter) flushQueuedMessages() {
+func (lg *syslogAdapter) flushQueue() {
 	deadline := time.Now().Add(flushTimeout)
 
 	for time.Now().Before(deadline) {
 		// Dequeue next message
-		elem := lg.queuedMessagesList.Front()
+		elem := lg.queue.Front()
 		if elem == nil {
 			break // Reached the end
 		}
-		lg.queuedMessagesList.Remove(elem)
+		lg.queue.Remove(elem)
 
 		// Send message to server
 		err := lg.writeBytes([]byte(elem.Value.(string)))
