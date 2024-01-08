@@ -4,6 +4,7 @@
 
 # Force the following filetypes to have unix eols, so Windows does not break them
 *.* text eol=lf
+LICENSE text eol=lf
 
 # Windows forced line-endings
 /.idea/* text eol=crlf
@@ -30,6 +31,7 @@
 *.ttf binary
 *.eot binary
 *.woff binary
+*.woff2 binary
 *.pyc binary
 *.pdf binary
 *.ez binary
